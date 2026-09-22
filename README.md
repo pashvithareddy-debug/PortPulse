@@ -1,155 +1,405 @@
+
 # PortPulse
 
-**"Why can't my application start? Which process is using this port?"**
+### A lightweight CLI for finding, inspecting, and safely freeing occupied ports.
 
-PortPulse is a small Python CLI that answers that question in one command —
-and, when you want it to, frees the port up for you.
+PortPulse is a Python command-line tool that answers a common developer
+problem:
 
-```text
-╭────────── PortPulse ──────────╮
-│ PORT │ STATUS │ PROCESS │ PID │
-├──────┼────────┼─────────┼─────┤
-│ 3000 │ IN USE │ node    │5832 │
-│ 5000 │ FREE   │ -       │ -   │
-│ 8000 │ IN USE │ uvicorn │4217 │
-│ 8080 │ FREE   │ -       │ -   │
-╰───────────────────────────────╯
-```
+> **"Why can't my application start, and which process is using this port?"**
 
-## Problem
+Instead of manually searching through system processes, PortPulse scans
+ports, identifies the process using them, displays useful process details,
+and can safely terminate the process when explicitly requested.
 
-You run `npm start` or `uvicorn main:app` and get `Address already in
-use`. Now what? PortPulse tells you exactly what's squatting on the port —
-name, PID, full command, and user — and can terminate it safely, with
-confirmation.
+---
 
-## Features
-
-- **Scan** a set of ports, a single port, or a whole range
-- **Identify** the exact process (name, PID, command, user) behind a busy port
-- **Kill** the offending process, with a confirmation prompt by default
-- **Safety first**: refuses to touch known critical system processes, and
-  re-verifies a process still owns a port immediately before killing it
-- **TCP and UDP** support
-- **JSON output** (`--json`) for scripting and CI
-- **Predictable exit codes** for shell scripting
-- **Zero-config** — sensible defaults, no setup required
-
-## Architecture
+## Demo
 
 ```text
-                    ┌──────────────┐
-                    │    User      │
-                    └──────┬───────┘
-                           ▼
-                    ┌──────────────┐
-                    │     CLI      │
-                    │   cli.py     │
-                    └──────┬───────┘
-             ┌─────────────┼─────────────┐
-             ▼             ▼             ▼
-       ┌──────────┐  ┌───────────┐  ┌───────────┐
-       │ Scanner  │  │  Process  │  │ Formatter │
-       │scanner.py│  │process.py │  │formatter.py│
-       └────┬─────┘  └─────┬─────┘  └───────────┘
-            ▼              ▼
-       ┌─────────────────────────┐
-       │     Operating System    │
-       │   sockets / psutil      │
-       └─────────────────────────┘
-```
+╭────────────── PortPulse ──────────────╮
+│ PORT │ STATUS │ PROCESS       │ PID   │
+├──────┼────────┼───────────────┼───────┤
+│ 3000 │ FREE   │ -             │ -     │
+│ 5000 │ IN USE │ ControlCenter │ 1138  │
+│ 8000 │ IN USE │ Python        │ 30396 │
+│ 8080 │ FREE   │ -             │ -     │
+╰───────────────────────────────────────╯
+````
 
-- `scanner.py` — decides whether a port is in use
-- `process.py` — turns a PID into a name/command/user, and terminates
-  processes safely
-- `formatter.py` — renders results as a table or JSON
-- `cli.py` — argument parsing and command wiring
+Example:
 
-### A note on the process backend
-
-The original design called for shelling out to `lsof`. This implementation
-uses [`psutil`](https://github.com/giampaolo/psutil) instead: it's a single
-well-maintained dependency that works identically on Linux, macOS, and
-Windows, and it avoids parsing `lsof`'s text output (whose columns differ
-across platforms and versions). It also gives PortPulse a reliable way to
-detect UDP sockets, which a bare TCP `connect()` probe can't do at all.
-
-## Installation
-
-```bash
-git clone <this-repo>
-cd PortPulse
-pip install .
-```
-
-This installs the `portpulse` command. For local development instead:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-and run it as `python3 main.py <command>`.
-
-## Usage
-
-```bash
-portpulse scan                        # scan the default ports
-portpulse scan --ports 3000 8000      # scan specific ports
-portpulse check 8000                  # check a single port, with full detail
-portpulse range 8000 8100             # scan a port range
-portpulse kill 8000                   # kill whatever is using port 8000
-```
-
-## Commands
-
-| Command | Description |
-|---|---|
-| `scan [--ports P ...]` | Scan a set of ports (default: 3000, 5000, 8000, 8080) |
-| `check <port>` | Show full detail for a single port |
-| `range <start> <end>` | Scan every port in an inclusive range |
-| `kill <port>` | Terminate the process using a port |
-
-Flags available on every command: `--protocol {tcp,udp}` (default `tcp`),
-`--json`, `--no-color`.
-
-Flags specific to `kill`: `--yes` (skip confirmation), `--force` (escalate
-to `SIGKILL` if the process ignores `SIGTERM`), `--allow-protected` (permit
-killing a process PortPulse flags as critical).
-
-## Examples
-
-```bash
-$ portpulse check 8000
-Port 8000
-Status: IN USE
-Process: uvicorn
-PID: 4217
-User: alice
-Command: python main.py
-
+```text
 $ portpulse kill 8000
-Port 8000 is being used by uvicorn (PID 4217)
+
+Port 8000 is being used by Python (PID 30396)
 Terminate this process? [y/N] y
 Process terminated.
 Port 8000 is now free.
 ```
 
-## JSON output
+---
+
+## Why PortPulse?
+
+A common development problem looks like this:
+
+```text
+Address already in use
+Port 8000 is already occupied
+```
+
+This can happen when:
+
+* a previous development server is still running
+* a process crashed without releasing a port
+* another application is using the same port
+* multiple local servers are running simultaneously
+
+PortPulse makes the investigation simple:
+
+```text
+Port
+ ↓
+Socket
+ ↓
+Process
+ ↓
+PID
+ ↓
+Process details
+ ↓
+Optional safe termination
+```
+
+---
+
+## Features
+
+* **Port scanning** for commonly used development ports
+* **Single-port checking** for detailed inspection
+* **Port-range scanning** for larger searches
+* **TCP support**
+* **UDP support**
+* **Process identification**
+* **PID identification**
+* **Process command and user information**
+* **Safe process termination**
+* **Confirmation before killing processes**
+* **Protected-process safeguards**
+* **Race-condition protection**
+* **SIGTERM before SIGKILL escalation**
+* **JSON output for scripting and automation**
+* **Predictable CLI exit codes**
+* **macOS `lsof` fallback** when socket ownership is restricted
+* **Cross-platform design** using Python and `psutil`
+* **Automated testing with GitHub Actions**
+* **Zero configuration for basic usage**
+
+---
+
+## Architecture
+
+```text
+                         ┌─────────────────┐
+                         │      User       │
+                         └────────┬────────┘
+                                  │
+                                  ▼
+                         ┌─────────────────┐
+                         │      CLI        │
+                         │     cli.py      │
+                         └────────┬────────┘
+                                  │
+              ┌───────────────────┼───────────────────┐
+              │                   │                   │
+              ▼                   ▼                   ▼
+       ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+       │   Scanner   │     │   Process   │     │  Formatter  │
+       │ scanner.py  │     │ process.py  │     │formatter.py │
+       └──────┬──────┘     └──────┬──────┘     └─────────────┘
+              │                   │
+              │                   │
+              ▼                   ▼
+       ┌────────────────────────────────────┐
+       │          Operating System          │
+       │                                    │
+       │  sockets • processes • networking  │
+       └────────────────────────────────────┘
+                    │
+             ┌──────┴──────┐
+             │             │
+             ▼             ▼
+          psutil         lsof
+         primary       macOS fallback
+```
+
+### Component Responsibilities
+
+#### `cli.py`
+
+Handles:
+
+* command-line arguments
+* command routing
+* confirmation prompts
+* exit codes
+* user-facing errors
+
+#### `scanner.py`
+
+Handles:
+
+* port validation
+* TCP scanning
+* UDP scanning
+* port-range scanning
+* socket inspection
+* macOS `lsof` fallback
+
+#### `process.py`
+
+Handles:
+
+* PID inspection
+* process name
+* command
+* user information
+* protected-process detection
+* ownership re-checking
+* safe process termination
+
+#### `formatter.py`
+
+Handles:
+
+* terminal table output
+* JSON output
+* color/no-color formatting
+
+---
+
+## Tech Stack
+
+| Category                    | Technology            |
+| --------------------------- | --------------------- |
+| Language                    | Python                |
+| Process & Socket Inspection | psutil                |
+| macOS Fallback              | lsof                  |
+| CLI                         | Python argparse       |
+| Testing                     | pytest                |
+| Packaging                   | Python pyproject.toml |
+| Version Control             | Git + GitHub          |
+| CI/CD                       | GitHub Actions        |
+| License                     | MIT                   |
+
+---
+
+## Repository Structure
+
+```text
+PortPulse/
+│
+├── .github/
+│   └── workflows/
+│       └── tests.yml
+│
+├── portpulse/
+│   ├── __init__.py
+│   ├── cli.py
+│   ├── formatter.py
+│   ├── process.py
+│   └── scanner.py
+│
+├── tests/
+│   ├── __init__.py
+│   ├── test_cli.py
+│   ├── test_formatter.py
+│   ├── test_process.py
+│   └── test_scanner.py
+│
+├── main.py
+├── pyproject.toml
+├── requirements.txt
+├── .gitignore
+├── LICENSE
+└── README.md
+```
+
+---
+
+## Installation
+
+### Clone the repository
 
 ```bash
-$ portpulse scan --ports 8000 8080 --json
+git clone https://github.com/pashvithareddy-debug/PortPulse.git
+cd PortPulse
+```
+
+### Create a virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+### Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+For development and testing:
+
+```bash
+pip install pytest
+```
+
+---
+
+## Usage
+
+### Scan default ports
+
+```bash
+python3 main.py scan
+```
+
+Default ports:
+
+```text
+3000
+5000
+8000
+8080
+```
+
+### Scan specific ports
+
+```bash
+python3 main.py scan --ports 3000 8000 8080
+```
+
+### Check a single port
+
+```bash
+python3 main.py check 8000
+```
+
+Example:
+
+```text
+Port 8000
+Status: IN USE
+Process: Python
+PID: 30396
+User: ashvitha
+Command: python3 -m http.server 8000
+```
+
+### Scan a port range
+
+```bash
+python3 main.py range 8000 8100
+```
+
+### Scan UDP ports
+
+```bash
+python3 main.py scan --protocol udp
+```
+
+### Kill the process using a port
+
+```bash
+python3 main.py kill 8000
+```
+
+PortPulse asks for confirmation:
+
+```text
+Port 8000 is being used by Python (PID 30396)
+Terminate this process? [y/N] y
+Process terminated.
+Port 8000 is now free.
+```
+
+---
+
+## Command Reference
+
+| Command               | Purpose                                   |
+| --------------------- | ----------------------------------------- |
+| `scan`                | Scan a set of ports                       |
+| `check <port>`        | Inspect a single port                     |
+| `range <start> <end>` | Scan an inclusive port range              |
+| `kill <port>`         | Safely terminate the process using a port |
+
+### Common Options
+
+```text
+--protocol {tcp,udp}
+--json
+--no-color
+```
+
+### Kill Options
+
+```text
+--yes
+--force
+--allow-protected
+```
+
+#### `--yes`
+
+Skip the confirmation prompt.
+
+```bash
+python3 main.py kill 8000 --yes
+```
+
+#### `--force`
+
+Escalate from SIGTERM to SIGKILL if the process does not exit.
+
+```bash
+python3 main.py kill 8000 --force
+```
+
+#### `--allow-protected`
+
+Explicitly permit termination of a process that PortPulse identifies as
+protected.
+
+```bash
+python3 main.py kill 8000 --allow-protected
+```
+
+---
+
+## JSON Output
+
+PortPulse can produce machine-readable JSON for scripts and automation.
+
+```bash
+python3 main.py scan --json
+```
+
+Example:
+
+```json
 {
   "ports": [
     {
       "port": 8000,
       "protocol": "tcp",
       "status": "IN_USE",
-      "pid": 4217,
-      "process": "uvicorn",
-      "command": "python main.py",
-      "user": "alice"
+      "pid": 30396,
+      "process": "Python",
+      "command": "python3 -m http.server 8000",
+      "user": "ashvitha"
     },
     {
       "port": 8080,
@@ -164,72 +414,302 @@ $ portpulse scan --ports 8000 8080 --json
 }
 ```
 
-## Exit codes
+This makes PortPulse useful in:
 
-| Code | Meaning |
-|---|---|
-| `0` | Success — port free (`check`), or command completed normally |
-| `1` | Port in use (`check`), or a kill/process problem |
-| `2` | Invalid arguments (bad port number, unknown command) |
-| `3` | Permission or system-level error |
+* shell scripts
+* development workflows
+* CI pipelines
+* automation tools
+* debugging utilities
+
+---
+
+## Safety Design
+
+Process termination is destructive, so PortPulse is deliberately
+conservative.
+
+### 1. Confirmation by default
+
+The `kill` command asks for confirmation before terminating a process.
+
+```text
+Terminate this process? [y/N]
+```
+
+### 2. Protected processes
+
+PortPulse maintains a list of known critical process names and protects
+PIDs `0` and `1`.
+
+Protected processes require explicit permission before termination.
+
+### 3. Ownership re-check
+
+Before terminating a process, PortPulse verifies that the PID still owns
+the requested port.
+
+This protects against a race condition where:
+
+```text
+Process A owns port 8000
+        ↓
+Process A exits
+        ↓
+Process B takes port 8000
+        ↓
+User confirms kill
+```
+
+PortPulse re-checks ownership before sending the termination signal.
+
+### 4. SIGTERM before SIGKILL
+
+PortPulse first requests a graceful shutdown using SIGTERM.
+
+Only when `--force` is explicitly requested does it escalate to SIGKILL.
+
+### 5. No automatic sudo
+
+PortPulse never automatically requests elevated privileges.
+
+If the operating system denies access, the tool reports the problem rather
+than silently attempting privileged execution.
+
+---
+
+## macOS Socket Detection
+
+macOS can restrict access to system socket information through `psutil`.
+
+When this happens, PortPulse uses:
+
+```text
+psutil
+   ↓
+AccessDenied
+   ↓
+lsof fallback
+   ↓
+PID + port ownership
+```
+
+For example:
+
+```text
+Port 8000
+    ↓
+lsof
+    ↓
+Python
+    ↓
+PID 30396
+```
+
+This allows PortPulse to continue identifying TCP processes even when
+`psutil` cannot access the required socket information.
+
+For UDP, `psutil` remains necessary because UDP does not provide the same
+connection handshake available to TCP.
+
+---
+
+## Exit Codes
+
+| Code | Meaning                                                           |
+| ---- | ----------------------------------------------------------------- |
+| `0`  | Command completed successfully                                    |
+| `1`  | Port is in use during `check`, or a process/kill operation failed |
+| `2`  | Invalid command-line arguments                                    |
+| `3`  | Permission or system-level error                                  |
+
+Example:
 
 ```bash
-portpulse check 8000
+python3 main.py check 8000
+
 if [ $? -eq 0 ]; then
-    echo "8000 is free, safe to start the server"
+    echo "Port 8000 is free"
 fi
 ```
 
-## Safety
-
-Killing processes is destructive, so PortPulse is conservative by default:
-
-- **Confirms before killing.** `kill` always prompts unless you pass `--yes`.
-- **Protects critical processes.** A short list of known system-critical
-  process names (`init`, `systemd`, `sshd`, `explorer.exe`, etc.) and PIDs
-  0/1 require an extra `--allow-protected` flag, even with `--yes`.
-- **Re-checks ownership right before killing.** If the port changed hands
-  between scan and kill (a race condition), PortPulse refuses and asks you
-  to re-check rather than terminating the wrong process.
-- **SIGTERM before SIGKILL.** PortPulse asks the process to exit cleanly
-  first, and only escalates to `SIGKILL` if you pass `--force` and it
-  doesn't exit in time.
-- **Never requests elevated privileges automatically.** If a kill fails with
-  a permission error, PortPulse tells you and stops — it won't try `sudo`
-  on your behalf.
+---
 
 ## Testing
 
+PortPulse includes automated tests covering the scanner, process layer,
+formatter, and CLI.
+
+Run:
+
 ```bash
-pip install -r requirements.txt pytest
-pytest -v
+python3 -m pytest -q
 ```
 
-47 tests across the scanner, process, formatter, and CLI layers, including
-real (not mocked) sockets and subprocesses:
+Current test result:
 
-- **Scanner**: free ports, occupied ports, invalid ports, ranges, multi-port batches
-- **Process**: PID lookup, missing PIDs, protected-process refusal, kill,
-  stale-PID race protection
-- **Formatter**: table rendering, color/no-color, JSON structure
-- **CLI**: every command, JSON mode, exit codes, invalid input
+```text
+47 passed
+```
+
+### Test Coverage Areas
+
+#### Scanner
+
+* free ports
+* occupied ports
+* invalid ports
+* port ranges
+* multiple ports
+* TCP
+* UDP
+
+#### Process
+
+* PID lookup
+* process information
+* missing PIDs
+* protected-process detection
+* process termination
+* stale PID protection
+* permission handling
+
+#### Formatter
+
+* terminal table rendering
+* JSON formatting
+* color/no-color output
+
+#### CLI
+
+* command parsing
+* scan
+* check
+* range
+* kill
+* JSON mode
+* exit codes
+* invalid input
+
+---
+
+## Continuous Integration
+
+PortPulse uses **GitHub Actions** to automatically run the test suite when
+changes are pushed to the repository.
+
+```text
+Git push
+   ↓
+GitHub Actions
+   ↓
+Install dependencies
+   ↓
+Run pytest
+   ↓
+47 tests
+   ↓
+Pass / Fail
+```
+
+This helps ensure that future changes do not silently break existing
+functionality.
+
+---
 
 ## Limitations
 
-- UDP detection requires `psutil`; there's no fallback for it, since a raw
-  socket probe can't reliably tell whether anything is listening on a UDP port.
-- Listing all system sockets (used by `scan`/`range`/`check`) may require
-  elevated privileges on some locked-down systems; PortPulse falls back to
-  a slower per-port TCP probe in that case (no PID info) rather than failing.
-- The protected-process list is a safety net, not a guarantee — always
-  read the process name before confirming a kill.
+* UDP detection requires `psutil`; there is no reliable raw-socket fallback
+  for determining whether a UDP port is actually in use.
+* Operating-system permissions can restrict access to socket ownership
+  information.
+* On macOS, PortPulse uses `lsof` as a fallback when `psutil` cannot inspect
+  the required TCP socket information.
+* If socket ownership cannot be determined, PortPulse may still determine
+  that a TCP port is reachable without being able to identify its PID.
+* The protected-process list is a safety mechanism, not a complete
+  guarantee. Users should always inspect the process information before
+  confirming termination.
+* PortPulse is intended primarily as a local developer utility rather than
+  a full network monitoring system.
+
+---
 
 ## Future Improvements
 
-- Optional `.portpulserc` config file for default ports, output format, and color preference
-- `--watch` mode to continuously monitor a set of ports
-- Richer protected-process detection based on parent PID / session leader status
+Planned improvements include:
+
+* `--watch` mode for continuous monitoring
+* `.portpulserc` configuration
+* configurable default ports
+* configurable output preferences
+* richer protected-process detection
+* parent-process and session information
+* improved cross-platform process discovery
+* additional automated integration tests
+* package publishing for easier installation
+
+---
+
+## Project Highlights
+
+PortPulse demonstrates practical use of:
+
+* Python
+* CLI application design
+* TCP/IP networking concepts
+* UDP socket concepts
+* Operating-system process management
+* PID handling
+* subprocess execution
+* defensive programming
+* race-condition prevention
+* error handling
+* JSON serialization
+* automated testing
+* Git and GitHub
+* CI/CD with GitHub Actions
+
+---
+
+## Version Control
+
+**Git + GitHub | Source code management and version control**
+
+The project uses Git for:
+
+* source-code versioning
+* structured commits
+* change tracking
+* branch management
+
+GitHub is used for:
+
+* remote source-code hosting
+* repository management
+* collaboration
+* continuous integration through GitHub Actions
+
+---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+This project is licensed under the MIT License.
+
+See [LICENSE](LICENSE) for details.
+
+---
+
+## Author
+
+**Ashvitha Reddy**
+
+Computer Science & Engineering Student
+
+Built as a practical developer-tool project focused on networking,
+operating-system process management, CLI development, and automation.
+
+
+
+
+
